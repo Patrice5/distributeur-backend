@@ -503,6 +503,21 @@ if __name__ == '__main__':
     logger.info("Initialisation de la base de données...")
     initialiser_base()
     
+    # ✨ NOUVEAU : En production, créer des données de démo si base vide
+    if os.getenv('FLASK_ENV') == 'production':
+        try:
+            nb_ventes = compter_ventes_jour()
+            if nb_ventes == 0:
+                logger.info("Base vide détectée, création de données de démonstration...")
+                # Importer le script de démo
+                import sys
+                sys.path.append(os.path.dirname(__file__))
+                from scripts.init_demo import generer_donnees_demo
+                generer_donnees_demo()
+                logger.info("✅ Données de démonstration créées")
+        except Exception as e:
+            logger.warning(f"⚠️ Impossible de créer les données de démo : {e}")
+    
     logger.info(f"Serveur Flask démarré sur {config.HOST}:{config.PORT}")
     logger.info(f"URL : http://localhost:{config.PORT}")
     logger.info(f"API : http://localhost:{config.PORT}/api/etat")
