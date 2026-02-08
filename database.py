@@ -17,16 +17,63 @@ NOM_DB = 'distributeur.db'
 def obtenir_connexion():
     """
     Crée et retourne une connexion à la base de données SQLite
+    Initialise automatiquement les tables si elles n'existent pas
     
     Retourne:
         sqlite3.Connection : Objet de connexion à la base
     """
+    # Vérifier si la base existe
+    db_existe = os.path.exists(NOM_DB)
+    
     # On se connecte à la base (elle sera créée si elle n'existe pas)
     connexion = sqlite3.connect(NOM_DB)
     
     # Cette ligne permet de récupérer les résultats sous forme de dictionnaires
-    # Au lieu de tuples, on aura des résultats plus lisibles
     connexion.row_factory = sqlite3.Row
+    
+    # ✨ NOUVEAU : Si la base vient d'être créée, initialiser les tables
+    if not db_existe:
+        print("⚠️ Base de données inexistante, création automatique des tables...")
+        curseur = connexion.cursor()
+        
+        # Table ventes
+        curseur.execute('''
+            CREATE TABLE IF NOT EXISTS ventes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                boisson TEXT NOT NULL,
+                date_heure DATETIME NOT NULL,
+                mode TEXT DEFAULT 'bouton',
+                prix REAL DEFAULT 0
+            )
+        ''')
+        
+        # Table mesures
+        curseur.execute('''
+            CREATE TABLE IF NOT EXISTS mesures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date_heure DATETIME NOT NULL,
+                temperature REAL,
+                niveau_bissap INTEGER,
+                niveau_zoom INTEGER,
+                niveau_tamarin INTEGER
+            )
+        ''')
+        
+        # Table alertes
+        curseur.execute('''
+            CREATE TABLE IF NOT EXISTS alertes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date_heure DATETIME NOT NULL,
+                type_alerte TEXT NOT NULL,
+                severite TEXT DEFAULT 'info',
+                message TEXT,
+                boisson TEXT,
+                resolu INTEGER DEFAULT 0
+            )
+        ''')
+        
+        connexion.commit()
+        print("✅ Tables créées automatiquement")
     
     return connexion
 
