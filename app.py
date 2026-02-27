@@ -27,7 +27,8 @@ from database import (
     obtenir_derniere_mesure,
     ajouter_alerte,
     obtenir_alertes_actives,
-    resoudre_alerte
+    resoudre_alerte,
+    obtenir_connexion
 )
 
 # Imports depuis services/statistiques.py
