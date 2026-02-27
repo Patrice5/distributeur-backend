@@ -487,6 +487,223 @@ def historique_temp_route():
         logger.error(f"Erreur historique températures : {str(e)}")
         return jsonify({'erreur': str(e)}), 500
 
+# ============================================
+# NOUVEAUX ENDPOINTS POUR LE POLLING
+# ============================================
+
+# File d'attente des commandes en mémoire
+# (En production, utilisez Redis ou une vraie BDD)
+commandes_en_attente = []
+
+# ========================================
+# ENDPOINT 1 : Commander (depuis l'app mobile)
+# ========================================
+
+@app.route('/api/commander', methods=['POST'])
+def commander():
+    """
+    Endpoint appelé par l'application mobile pour commander une boisson.
+    La commande est mise en file d'attente et sera récupérée par l'ESP32.
+    """
+    try:
+        data = request.json
+        boisson = data.get('boisson')
+        
+        # Validation de la boisson
+        if not boisson or boisson not in ['bissap', 'zoom-koom', 'tamarin']:
+            logger.warning(f"Boisson invalide reçue : {boisson}")
+            return jsonify({
+                'succes': False,
+                'erreur': 'Boisson invalide. Valeurs acceptées : bissap, zoom-koom, tamarin'
+            }), 400
+        
+        # 1. Enregistrer la vente dans la base de données (pour les statistiques)
+        conn = obtenir_connexion()
+        curseur = conn.cursor()
+        
+        curseur.execute('''
+            INSERT INTO ventes (boisson, date_heure, mode, prix)
+            VALUES (?, datetime('now', 'localtime'), ?, ?)
+        ''', (boisson, 'web', 200))  # Prix par défaut 200 FCFA
+        
+        vente_id = curseur.lastrowid
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"Vente enregistrée : {boisson} (ID: {vente_id})")
+        
+        # 2. Ajouter la commande à la file d'attente
+        commande = {
+            'id': len(commandes_en_attente) + 1,
+            'vente_id': vente_id,
+            'boisson': boisson,
+            'timestamp': datetime.now().isoformat(),
+            'status': 'pending'
+        }
+        commandes_en_attente.append(commande)
+        
+        logger.info(f"Commande ajoutée à la file : ID {commande['id']}, Boisson {boisson}")
+        logger.info(f"File d'attente : {len(commandes_en_attente)} commande(s)")
+        
+        # 3. Répondre à l'app mobile
+        return jsonify({
+            'succes': True,
+            'message': 'Commande en attente de distribution',
+            'commande_id': commande['id'],
+            'vente_id': vente_id,
+            'boisson': boisson
+        }), 202  # 202 Accepted (traitement asynchrone)
+        
+    except Exception as e:
+        logger.error(f"Erreur dans /api/commander : {e}")
+        return jsonify({
+            'succes': False,
+            'erreur': 'Erreur serveur'
+        }), 500
+
+
+# ========================================
+# ENDPOINT 2 : Récupérer les commandes en attente (polling ESP32)
+# ========================================
+
+@app.route('/api/commandes/pending', methods=['GET'])
+def get_pending_commandes():
+    """
+    Endpoint appelé par l'ESP32 toutes les 2 secondes pour vérifier
+    s'il y a des commandes en attente.
+    """
+    try:
+        if len(commandes_en_attente) > 0:
+            # Retourner la première commande de la file
+            commande = commandes_en_attente[0]
+            
+            logger.info(f"Commande envoyée à l'ESP32 : ID {commande['id']}, Boisson {commande['boisson']}")
+            
+            return jsonify({
+                'succes': True,
+                'has_pending': True,
+                'commande': {
+                    'id': commande['id'],
+                    'boisson': commande['boisson'],
+                    'timestamp': commande['timestamp']
+                }
+            }), 200
+        else:
+            # Pas de commande en attente
+            return jsonify({
+                'succes': True,
+                'has_pending': False
+            }), 200
+            
+    except Exception as e:
+        logger.error(f"Erreur dans /api/commandes/pending : {e}")
+        return jsonify({
+            'succes': False,
+            'erreur': 'Erreur serveur'
+        }), 500
+
+
+# ========================================
+# ENDPOINT 3 : Confirmer une commande (ESP32)
+# ========================================
+
+@app.route('/api/commandes/<int:commande_id>/confirm', methods=['POST'])
+def confirm_commande(commande_id):
+    """
+    Endpoint appelé par l'ESP32 après avoir distribué la boisson
+    pour confirmer que la commande est terminée.
+    """
+    try:
+        global commandes_en_attente
+        
+        # Chercher la commande dans la file
+        commande_trouvee = None
+        for commande in commandes_en_attente:
+            if commande['id'] == commande_id:
+                commande_trouvee = commande
+                break
+        
+        if commande_trouvee:
+            # Retirer la commande de la file
+            commandes_en_attente = [
+                c for c in commandes_en_attente 
+                if c['id'] != commande_id
+            ]
+            
+            logger.info(f"Commande {commande_id} confirmée et retirée de la file")
+            logger.info(f"File d'attente : {len(commandes_en_attente)} commande(s) restante(s)")
+            
+            return jsonify({
+                'succes': True,
+                'message': 'Commande confirmée',
+                'commande_id': commande_id
+            }), 200
+        else:
+            logger.warning(f"Commande {commande_id} non trouvée")
+            return jsonify({
+                'succes': False,
+                'erreur': 'Commande non trouvée'
+            }), 404
+            
+    except Exception as e:
+        logger.error(f"Erreur dans /api/commandes/{commande_id}/confirm : {e}")
+        return jsonify({
+            'succes': False,
+            'erreur': 'Erreur serveur'
+        }), 500
+
+
+# ========================================
+# ENDPOINT 4 : Annuler une commande (optionnel)
+# ========================================
+
+@app.route('/api/commandes/<int:commande_id>/cancel', methods=['POST'])
+def cancel_commande(commande_id):
+    """
+    Endpoint pour annuler une commande (niveau insuffisant, erreur technique, etc.)
+    """
+    try:
+        global commandes_en_attente
+        
+        data = request.json
+        raison = data.get('raison', 'Non spécifiée')
+        
+        # Retirer la commande
+        commandes_en_attente = [
+            c for c in commandes_en_attente 
+            if c['id'] != commande_id
+        ]
+        
+        logger.warning(f"Commande {commande_id} annulée. Raison : {raison}")
+        
+        return jsonify({
+            'succes': True,
+            'message': 'Commande annulée',
+            'commande_id': commande_id
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Erreur dans /api/commandes/{commande_id}/cancel : {e}")
+        return jsonify({
+            'succes': False,
+            'erreur': 'Erreur serveur'
+        }), 500
+
+
+# ========================================
+# ENDPOINT 5 : État de la file d'attente (debug)
+# ========================================
+
+@app.route('/api/commandes/queue', methods=['GET'])
+def get_queue_status():
+    """
+    Endpoint pour voir l'état de la file d'attente (pour debug)
+    """
+    return jsonify({
+        'succes': True,
+        'nombre_commandes': len(commandes_en_attente),
+        'commandes': commandes_en_attente
+    }), 200
 
 # ========================================
 # LANCEMENT DU SERVEUR
@@ -514,9 +731,9 @@ if __name__ == '__main__':
                 sys.path.append(os.path.dirname(__file__))
                 from scripts.init_demo import generer_donnees_demo
                 generer_donnees_demo()
-                logger.info("✅ Données de démonstration créées")
+                logger.info("Données de démonstration créées")
         except Exception as e:
-            logger.warning(f"⚠️ Impossible de créer les données de démo : {e}")
+            logger.warning(f"Impossible de créer les données de démo : {e}")
     
     logger.info(f"Serveur Flask démarré sur {config.HOST}:{config.PORT}")
     logger.info(f"URL : http://localhost:{config.PORT}")
